@@ -8,10 +8,12 @@ int main(int argc, char **argv)
 	char c, ok;
 	char *this_arg = NULL; 
 	char *file_names[argc]; 			// array of file names
-	FILE *music_file = NULL;
+	char *buffer;
+	FILE *fp = NULL;
 	data_t user_data;
 	FIELD_NAME field_num = SIZE;
 	FIELD_NAME field;
+	header_info_t header;
 
 	// allocate memory for input file names
 	if (!init_string_array(file_names, argc, MAX_NAME)) {
@@ -56,16 +58,79 @@ int main(int argc, char **argv)
 			strncpy(file_names[idx++], *argv, MAX_NAME);
 		}
 	}
-	printf("input files:\n");
-	for (idx = 0; idx < num_files; idx++) {
-		printf("%s\n", file_names[idx]);
+	// now loop through each input file and do work
+	buffer = malloc(sizeof(char) * STD_HEAD_SIZE);
+	if (buffer == NULL) {
+		printf("Error: out of memory\n");
+		exit(1);
 	}
-	printf("write args:\n");
-	for (field = 0; field < field_num; field++) {
-		if (user_data.fields[field] != NULL) {
-			printf("%s\n", user_data.fields[field]);
+	for (idx = 0; idx < num_files; idx++) {
+		fp = fopen(file_names[idx], "r");
+		if (fp == NULL) {
+			printf("Error: unable to open file: %s\n", file_names[idx]);
+			exit(1);
+		}
+		ok = find_id3_start(&fp, &header, &buffer, STD_HEAD_SIZE);
+		if (!ok) {
+			fclose(fp);
+			exit(1);
 		}
 	}
+
+
+	// free all malloced memory
+	for (field = 0; field < SIZE; field++) {
+		if (user_data.fields[field] != NULL) {
+			free(user_data.fields[field]);
+		}
+	}
+	for (idx = 0; idx <  num_files; idx++) {
+		if (file_names[idx] != NULL) {
+			free(file_names[idx]);
+		}
+	}
+}
+
+// Search file given by fp for start of ID3 tag and return with
+// file pointer at first byte after header (i.e. first field)
+char find_id3_start(FILE** fp, header_info_t* header, char** buf, int bufsz) {
+	size_t result;
+	char* subbuf;
+	int i;
+	
+	subbuf = malloc(sizeof(char) * bufsz);
+	if (subbuf == NULL) {
+		printf("Error: out of memory\n");
+		return 0;
+	}
+
+	result = fread(*buf, sizeof(char), bufsz, *fp);
+	if (result != bufsz*sizeof(char)) {
+		printf("Error: error occurred while reading from file\n");
+		return 0;
+	}
+	// check if tag is first thing in file (it often is)
+	if (strncmp(*buf, "ID3", 3) == 0) {
+		// found it - collect info
+		*buf += 3; // advance buffer passed "ID3"
+		strncpy(subbuf, *buf, NUM_VERS_BYTES);
+		header->version = 0;
+		for (i = 0; i < NUM_VERS_BYTES; i++) {
+			header->version |= subbuf[i] << 8*i;
+		}
+		(*buf) += NUM_VERS_BYTES;
+		header->flags = **buf; // 1 flags byte
+		(*buf) += NUM_FLAG_BYTES;
+		// next line not working for some reason???
+		strncpy(subbuf, *buf, NUM_SIZE_BYTES);
+		header->size = 0;
+		for (i = 0; i < NUM_SIZE_BYTES; i++) {
+			header->size |= subbuf[i] << 8*i;
+		}
+		printf("Size: %x\n", header->size);
+	}
+	free(subbuf);
+	return 0;
 }
 
 void print_usage() 
