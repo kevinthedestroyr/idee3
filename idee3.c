@@ -10,6 +10,7 @@ int main(int argc, char **argv)
 	char *file_names[argc]; 			// array of file names
 	char *buffer;
 	FILE *fp = NULL;
+	size_t result;
 	data_t user_data;
 	FIELD_NAME field_num = SIZE;
 	FIELD_NAME field;
@@ -59,22 +60,50 @@ int main(int argc, char **argv)
 		}
 	}
 	// now loop through each input file and do work
-	buffer = malloc(sizeof(char) * STD_HEAD_SIZE);
+	buffer = malloc(sizeof(char) * BUF_SIZE);
 	if (buffer == NULL) {
 		printf("Error: out of memory\n");
 		exit(1);
 	}
 	for (idx = 0; idx < num_files; idx++) {
 		fp = fopen(file_names[idx], "r");
+		// if write mode, open up a file for writing to
+		if (user_data.rwflag == WRITE) {
+			char new_file_name[MAX_NAME + 4];
+			strcpy(new_file_name, file_names[idx]);
+			strcat(new_file_name, ".new");
+			printf("new file name: %s\n", new_file_name);
+			user_data.new_file = fopen(new_file_name, "w");
+			if (user_data.new_file == NULL) {
+				printf("Error: could not create file %s for writing\n",
+						new_file_name);
+			}
+		}
 		if (fp == NULL) {
 			printf("Error: unable to open file: %s\n", file_names[idx]);
 			exit(1);
 		}
-		ok = find_id3_start(&fp, &header, &buffer, STD_HEAD_SIZE);
+		ok = find_id3_start(&fp, &header, &buffer, BUF_SIZE);
 		if (!ok) {
 			fclose(fp);
 			exit(1);
 		}
+		char keepgoing = 1;
+		char* tag = malloc(sizeof(char)*TAG_SIZE + 1);
+		while (keepgoing) {
+			idx = 0;
+			result = fread(buffer, BUF_SIZE, 1, fp);
+			if (result < BUF_SIZE) {
+				keepgoing = 0;
+			}
+			char moretags = 1;
+			while (moretags) {
+				memcpy(tag, &buffer[idx], TAG_SIZE);
+				tag[TAG_SIZE] = '\0';
+				parse_tag(tag, TAG_SIZE, &user_data);
+			}
+		}
+		fclose(user_data.new_file);
 	}
 
 
@@ -113,7 +142,7 @@ char find_id3_start(FILE** fp, header_info_t* header, char** buf, int bufsz) {
 	if (strncmp(*buf, "ID3", 3) == 0) {
 		// found it - collect info
 		*buf += 3; // advance buffer passed "ID3"
-		strncpy(subbuf, *buf, NUM_VERS_BYTES);
+		memcpy(subbuf, *buf, NUM_VERS_BYTES);
 		header->version = 0;
 		for (i = 0; i < NUM_VERS_BYTES; i++) {
 			header->version |= subbuf[i] << 8*i;
@@ -122,10 +151,10 @@ char find_id3_start(FILE** fp, header_info_t* header, char** buf, int bufsz) {
 		header->flags = **buf; // 1 flags byte
 		(*buf) += NUM_FLAG_BYTES;
 		// next line not working for some reason???
-		strncpy(subbuf, *buf, NUM_SIZE_BYTES);
+		memcpy(subbuf, *buf, NUM_SIZE_BYTES);
 		header->size = 0;
 		for (i = 0; i < NUM_SIZE_BYTES; i++) {
-			header->size |= subbuf[i] << 8*i;
+			header->size |= subbuf[i] << 8*(NUM_SIZE_BYTES - i - 1);
 		}
 		printf("Size: %x\n", header->size);
 	}
