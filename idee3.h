@@ -43,5 +43,7 @@ typedef struct {
 void print_usage();
 char get_user_fields(int* argcount, char*** args, data_t* user_data);
 char init_string_array(char* strarr[], int arr_size, int str_len); 
-char find_id3_start(FILE**, header_info_t*, char** buffer, int bufsize);
+char find_id3_start(FILE**, header_info_t*, char** buffer, int* buffer_index, int bufsize);
 char parse_tag(char* tag, int tag_size, data_t* user_data);
+FIELD_NAME field_from_tag(char*);
+void adjust_spacing(char*, int);

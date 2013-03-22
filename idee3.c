@@ -5,6 +5,7 @@
 int main(int argc, char **argv)
 {
 	unsigned idx, num_files;
+	int errorno, i;
 	char c, ok;
 	char *this_arg = NULL; 
 	char *file_names[argc]; 			// array of file names
@@ -25,6 +26,8 @@ int main(int argc, char **argv)
 	for (field = 0; field < SIZE; field++) {
 		user_data.fields[field] = NULL;
 	}
+
+	user_data.new_file = NULL; // initialize to NULL
 
 	// get command line options and arguments
 	idx = 0;
@@ -65,12 +68,13 @@ int main(int argc, char **argv)
 		printf("Error: out of memory\n");
 		exit(1);
 	}
-	for (idx = 0; idx < num_files; idx++) {
-		fp = fopen(file_names[idx], "r");
+	int file_index;
+	for (file_index = 0; file_index < num_files; file_index++) {
+		fp = fopen(file_names[file_index], "r");
 		// if write mode, open up a file for writing to
 		if (user_data.rwflag == WRITE) {
 			char new_file_name[MAX_NAME + 4];
-			strcpy(new_file_name, file_names[idx]);
+			strcpy(new_file_name, file_names[file_index]);
 			strcat(new_file_name, ".new");
 			printf("new file name: %s\n", new_file_name);
 			user_data.new_file = fopen(new_file_name, "w");
@@ -80,30 +84,74 @@ int main(int argc, char **argv)
 			}
 		}
 		if (fp == NULL) {
-			printf("Error: unable to open file: %s\n", file_names[idx]);
+			printf("Error: unable to open file: %s\n", file_names[file_index]);
 			exit(1);
 		}
-		ok = find_id3_start(&fp, &header, &buffer, BUF_SIZE);
+		ok = find_id3_start(&fp, &header, &buffer, &idx, BUF_SIZE);
 		if (!ok) {
 			fclose(fp);
 			exit(1);
 		}
-		char keepgoing = 1;
+		char more_tags = 1;
 		char* tag = malloc(sizeof(char)*TAG_SIZE + 1);
-		while (keepgoing) {
-			idx = 0;
-			result = fread(buffer, BUF_SIZE, 1, fp);
-			if (result < BUF_SIZE) {
-				keepgoing = 0;
+		tag[TAG_SIZE] = '\0'; // null terminate the tag name buffer
+		while (more_tags) {
+			// refill the buffer
+			if (idx >= BUF_SIZE) {
+				idx = 0;
+				size_t count = fread(buffer, sizeof(char), BUF_SIZE, fp);
+				if (count < sizeof(char)*BUF_SIZE) {
+					// couldn't fill buf
+					if (feof(fp)) {
+						more_tags = 0;
+					}
+					else {
+						printf("Error: file read error: %d\n", errorno = ferror(fp));
+						fclose(fp);
+						exit(errorno);
+					}
+				}
 			}
-			char moretags = 1;
-			while (moretags) {
-				memcpy(tag, &buffer[idx], TAG_SIZE);
-				tag[TAG_SIZE] = '\0';
-				parse_tag(tag, TAG_SIZE, &user_data);
+			memcpy(tag, &buffer[idx], sizeof(char)*TAG_SIZE);
+			for (i = 0; i < TAG_SIZE; i++) {
+				if (!isupper(tag[i]) && !isdigit(tag[i])) {
+					// this is not a legit tag
+					more_tags = 0;
+					break;
+				}
+			}
+			if (more_tags == 0) break;
+			idx += TAG_SIZE; // advance our buffer index
+			int fieldsize = 0;
+			int cur_pos;
+			for (cur_pos = idx; idx - cur_pos  < 4 && idx < BUF_SIZE; idx++) {
+				fieldsize += (buffer[idx] << 8*(3 - idx + cur_pos));
+			}
+			if (idx + fieldsize + 2 + TAG_SIZE >= BUF_SIZE) { // two is for the two flag bytes
+				fseek(fp, cur_pos - idx, SEEK_CUR); // put file point to start of this tag
+				continue;
+			}
+			// skip flag bytes
+			idx += 2;
+			if (fieldsize <= MAX_FIELD) {
+				int fieldint = (int) field_from_tag(tag);
+				if (fieldint != -1 && user_data.fields[fieldint] != NULL) {
+					memcpy(user_data.fields[fieldint], &buffer[idx], fieldsize);
+					adjust_spacing(user_data.fields[fieldint], fieldsize);
+				}
+			}
+			idx += fieldsize;
+
+		}
+		fclose(fp);
+		if (user_data.new_file != NULL) {
+			fclose(user_data.new_file);
+		}
+		for (field = 0; field < SIZE; field++) {
+			if (user_data.fields[field] != NULL) {
+				printf("%s\n", user_data.fields[field]);
 			}
 		}
-		fclose(user_data.new_file);
 	}
 
 
@@ -122,7 +170,7 @@ int main(int argc, char **argv)
 
 // Search file given by fp for start of ID3 tag and return with
 // file pointer at first byte after header (i.e. first field)
-char find_id3_start(FILE** fp, header_info_t* header, char** buf, int bufsz) {
+char find_id3_start(FILE** fp, header_info_t* header, char** buf, int* buf_idx, int bufsz) {
 	size_t result;
 	char* subbuf;
 	int i;
@@ -138,28 +186,28 @@ char find_id3_start(FILE** fp, header_info_t* header, char** buf, int bufsz) {
 		printf("Error: error occurred while reading from file\n");
 		return 0;
 	}
+	*buf_idx = 0;
 	// check if tag is first thing in file (it often is)
 	if (strncmp(*buf, "ID3", 3) == 0) {
 		// found it - collect info
-		*buf += 3; // advance buffer passed "ID3"
-		memcpy(subbuf, *buf, NUM_VERS_BYTES);
+		*buf_idx += 3; // advance buffer passed "ID3"
+		memcpy(subbuf, &(*buf)[*buf_idx], NUM_VERS_BYTES);
 		header->version = 0;
 		for (i = 0; i < NUM_VERS_BYTES; i++) {
 			header->version |= subbuf[i] << 8*i;
 		}
-		(*buf) += NUM_VERS_BYTES;
-		header->flags = **buf; // 1 flags byte
-		(*buf) += NUM_FLAG_BYTES;
-		// next line not working for some reason???
-		memcpy(subbuf, *buf, NUM_SIZE_BYTES);
+		(*buf_idx) += NUM_VERS_BYTES;
+		header->flags = (*buf)[*buf_idx]; // 1 flags byte
+		(*buf_idx) += NUM_FLAG_BYTES;
+		memcpy(subbuf, &(*buf)[*buf_idx], NUM_SIZE_BYTES);
 		header->size = 0;
 		for (i = 0; i < NUM_SIZE_BYTES; i++) {
 			header->size |= subbuf[i] << 8*(NUM_SIZE_BYTES - i - 1);
 		}
-		printf("Size: %x\n", header->size);
+		*buf_idx += NUM_SIZE_BYTES;
 	}
 	free(subbuf);
-	return 0;
+	return 1;
 }
 
 void print_usage() 
@@ -247,4 +295,51 @@ char init_string_array(char* strarr[], int arr_size, int str_len) {
 		}
 	}
 	return 1;
+}
+
+FIELD_NAME field_from_tag(char* tag_str) {
+	FIELD_NAME result;
+	if (strcmp(tag_str, "TIT2") == 0) {
+		result = TITLE;
+		return result;
+	}
+	if (strcmp(tag_str, "TALB") == 0) {
+		result = ALBUM;
+		return result;
+	}
+	if (strcmp(tag_str, "TPE1") == 0) {
+		result = ARTIST;
+		return result;
+	}
+	if (strcmp(tag_str, "TRCK") == 0) {
+		result = TRACK;
+		return result;
+	}
+	if (strcmp(tag_str, "TYER") == 0) {
+		result = YEAR;
+		return result;
+	}
+}
+
+// undoes tags spaced out with nulls between each character,
+// this pattern is indicated by the flag 0x01fffe at the start
+// of the string.
+void adjust_spacing(char *field_string, int fieldsize) {
+	int i = 0;
+	char spaced = 1;
+	if (!(field_string[i] == '\001') ||
+			!(field_string[++i] == '\377') ||
+			!(field_string[++i] == '\376')) {
+		// nothing to do here
+		spaced = 0;
+	}
+	i++; // go to first char of actual string
+	int k = 0;
+	while (i < fieldsize) {
+		field_string[k++] = field_string[i++];
+		if (spaced) {
+			i++; // skip null space
+		}
+	}
+	field_string[k] = '\0'; // null terminate
 }
