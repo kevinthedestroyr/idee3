@@ -13,6 +13,7 @@ int main(int argc, char **argv)
 	FILE *fp = NULL;
 	size_t result;
 	data_t user_data;
+	int field_order[NUM_FIELDS+1];
 	FIELD_NAME field_num = SIZE;
 	FIELD_NAME field;
 	header_info_t header;
@@ -52,7 +53,7 @@ int main(int argc, char **argv)
 					break;
 			}
 			// user has requested either read or write
-			ok = get_user_fields(&argc, &argv, &user_data);
+			ok = get_user_fields(&argc, &argv, &user_data, field_order);
 			if (!ok) {
 				exit(1);
 			}
@@ -147,10 +148,9 @@ int main(int argc, char **argv)
 		if (user_data.new_file != NULL) {
 			fclose(user_data.new_file);
 		}
-		for (field = 0; field < SIZE; field++) {
-			if (user_data.fields[field] != NULL) {
-				printf("%s\n", user_data.fields[field]);
-			}
+		int k;
+		for (k = 0; k < NUM_FIELDS && field_order[k] != -1; k++) {
+			printf("%s\n", user_data.fields[field_order[k]]);
 		}
 	}
 
@@ -218,15 +218,22 @@ void print_usage()
 		   "  -w\t\t\twrite or edit meta-data of FILE\n\n");
 }
 
-char get_user_fields(int* argcount, char*** args, data_t* user_data) 
+char get_user_fields(int* argcount, char*** args, data_t* user_data, int* order) 
 {
 	char* this_arg;
 	char done, retval;
 	FIELD_NAME field;
+	int order_index;
 	int data_flag;	// flag indicating that user field data should be next argument
 					//	used for write mode only
 
+	// initialize field_order with null before getting user data
+	int k;
+	for (k = 0; k < NUM_FIELDS + 1; k++) {
+		order[k] = -1;
+	}
 	data_flag = 0;
+	order_index = 0;
 	done = 0;
 	retval = 1;
 	while (!done && --*argcount) {
@@ -263,6 +270,13 @@ char get_user_fields(int* argcount, char*** args, data_t* user_data)
 					break;
 			}
 			if (!done) {
+				if (order_index <= NUM_FIELDS) {
+					order[order_index++] = (int)field;
+				}
+				else {
+					printf("Error: requested repeat or unsupported fields\n");
+					exit(1);
+				}
 			   	++*args; // advance arg pointer if we used the arg
 				user_data->fields[field] = malloc(sizeof(char) * MAX_FIELD);
 				if (user_data->rwflag == WRITE) { // next argument should be input string

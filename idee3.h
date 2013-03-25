@@ -41,7 +41,7 @@ typedef struct {
 } header_info_t;
 
 void print_usage();
-char get_user_fields(int* argcount, char*** args, data_t* user_data);
+char get_user_fields(int* argcount, char*** args, data_t* user_data, int *field_order);
 char init_string_array(char* strarr[], int arr_size, int str_len); 
 char find_id3_start(FILE**, header_info_t*, char** buffer, int* buffer_index, int bufsize);
 char parse_tag(char* tag, int tag_size, data_t* user_data);
