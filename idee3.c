@@ -8,7 +8,7 @@ int main(int argc, char **argv)
 	int errorno, i;
 	char c, ok;
 	char *this_arg = NULL; 
-	char *file_names[argc]; 			// array of file names
+	char *file_names[argc];
 	char *buffer;
 	FILE *fp = NULL;
 	size_t result;
@@ -28,50 +28,68 @@ int main(int argc, char **argv)
 		user_data.fields[field] = NULL;
 	}
 
-	user_data.new_file = NULL; // initialize to NULL
+	user_data.new_file = NULL; 
 
 	// get command line options and arguments
 	idx = 0;
 	num_files = 0;
-	while (--argc > 0) {
-		if (**++argv == '-') { // option
-			switch (*++*argv) {
-				case 'r':
-					user_data.rwflag = READ;
-					break;
-				case 'w':
-					user_data.rwflag = WRITE;
-					break;
-				case 'h':
-					print_usage();
-					exit(0);
-					break;
-				default:
-					printf("Error: unrecognized option: -%s\n", *argv);
-					print_usage();
-					exit(1);
-					break;
-			}
-			// user has requested either read or write
-			ok = get_user_fields(&argc, &argv, &user_data, field_order);
-			if (!ok) {
-				exit(1);
-			}
+	if (**++argv == '-') { // option
+		switch (*++*argv) {
+			case 'h':
+				print_usage();
+				exit(0);
+				break;
+
+			case 'w':
+				user_data.rwflag = WRITE;
+				if (*(*argv + 1) == '\0') {
+					if (--argc) argv++;
+					else print_usage(), exit(1);
+				}
+				else **argv = '-';
+				break;
+
+			case 'r':
+				user_data.rwflag = READ;
+				if (*(*argv + 1) == '\0') {
+					if (--argc) argv++;
+					else print_usage(), exit(1);
+				}
+				else **argv = '-';
+				break;
+
+			default:
+				--*argv;
+				user_data.rwflag = READ;
+				break;
 		}
-		else { // these should be the file names
-			num_files++;
-			strncpy(file_names[idx++], *argv, MAX_NAME);
+		// initialize field_order with null before getting user data
+		int k;
+		for (k = 0; k < NUM_FIELDS + 1; k++) {
+			field_order[k] = -1;
+		}
+		ok = get_user_fields(&argc, &argv, &user_data, field_order);
+		if (!ok) {
+			exit(1);
 		}
 	}
-	// now loop through each input file and do work
-	buffer = malloc(sizeof(char) * BUF_SIZE);
-	if (buffer == NULL) {
-		printf("Error: out of memory\n");
+	else {
+		print_usage();
 		exit(1);
 	}
+	while (--argc > 0) {
+		num_files++;
+		strncpy(file_names[idx++], *argv++, MAX_NAME);
+	}
+	// now loop through each input file and do work
 	int file_index;
 	for (file_index = 0; file_index < num_files; file_index++) {
 		fp = fopen(file_names[file_index], "r");
+		if (fp == NULL) {
+			printf("Error: unable to open file: %s\n", file_names[file_index]);
+			exit(1);
+		}
+
 		// if write mode, open up a file for writing to
 		if (user_data.rwflag == WRITE) {
 			char new_file_name[MAX_NAME + 4];
@@ -84,73 +102,35 @@ int main(int argc, char **argv)
 						new_file_name);
 			}
 		}
-		if (fp == NULL) {
-			printf("Error: unable to open file: %s\n", file_names[file_index]);
-			exit(1);
-		}
-		ok = find_id3_start(&fp, &header, &buffer, &idx, BUF_SIZE);
+
+		ok = find_id3_start(&header, &fp);
 		if (!ok) {
 			fclose(fp);
 			exit(1);
 		}
-		char more_tags = 1;
-		char* tag = malloc(sizeof(char)*TAG_SIZE + 1);
-		tag[TAG_SIZE] = '\0'; // null terminate the tag name buffer
-		while (more_tags) {
-			// refill the buffer
-			if (idx >= BUF_SIZE) {
-				idx = 0;
-				size_t count = fread(buffer, sizeof(char), BUF_SIZE, fp);
-				if (count < sizeof(char)*BUF_SIZE) {
-					// couldn't fill buf
-					if (feof(fp)) {
-						more_tags = 0;
-					}
-					else {
-						printf("Error: file read error: %d\n", errorno = ferror(fp));
-						fclose(fp);
-						exit(errorno);
-					}
-				}
-			}
-			memcpy(tag, &buffer[idx], sizeof(char)*TAG_SIZE);
-			for (i = 0; i < TAG_SIZE; i++) {
-				if (!isupper(tag[i]) && !isdigit(tag[i])) {
-					// this is not a legit tag
-					more_tags = 0;
-					break;
-				}
-			}
-			if (more_tags == 0) break;
-			idx += TAG_SIZE; // advance our buffer index
-			int fieldsize = 0;
-			int cur_pos;
-			for (cur_pos = idx; idx - cur_pos  < 4 && idx < BUF_SIZE; idx++) {
-				fieldsize += (buffer[idx] << 8*(3 - idx + cur_pos));
-			}
-			if (idx + fieldsize + 2 + TAG_SIZE >= BUF_SIZE) { // two is for the two flag bytes
-				fseek(fp, cur_pos - idx, SEEK_CUR); // put file point to start of this tag
-				continue;
-			}
-			// skip flag bytes
-			idx += 2;
-			if (fieldsize <= MAX_FIELD) {
-				int fieldint = (int) field_from_tag(tag);
-				if (fieldint != -1 && user_data.fields[fieldint] != NULL) {
-					memcpy(user_data.fields[fieldint], &buffer[idx], fieldsize);
-					adjust_spacing(user_data.fields[fieldint], fieldsize);
-				}
-			}
-			idx += fieldsize;
 
+		ok = parse_tags(&user_data, &fp);
+		if (!ok) {
+			fclose(fp);
+			exit(1);
 		}
 		fclose(fp);
 		if (user_data.new_file != NULL) {
 			fclose(user_data.new_file);
 		}
+		char tab_str[2] = {'\0', '\0'};
+		if (num_files > 1) {
+			printf("%s:\n", file_names[file_index]);
+			tab_str[0] = '\t';
+		}
 		int k;
 		for (k = 0; k < NUM_FIELDS && field_order[k] != -1; k++) {
-			printf("%s\n", user_data.fields[field_order[k]]);
+			if (*user_data.fields[field_order[k]] == '\0') {
+				printf("%s<field not present>\n", tab_str);
+			}
+			else {
+				printf("%s%s\n", tab_str, user_data.fields[field_order[k]]);
+			}
 		}
 	}
 
@@ -168,46 +148,128 @@ int main(int argc, char **argv)
 	}
 }
 
+char parse_tags(data_t *user_data_in, FILE **fp_in) {
+	int idx, errorno;
+	char more_tags;
+	char* tag;
+	char* buffer;
+	data_t user_data;
+	FILE *fp;
+	size_t size;
+
+	user_data = *user_data_in;
+	fp = *fp_in;
+
+	tag = malloc(sizeof(char)*TAG_SIZE + 1);
+	tag[TAG_SIZE] = '\0'; // null terminate the tag name buffer
+	buffer = malloc(sizeof(char) * BUF_SIZE);
+	if (buffer == NULL) {
+		printf("Error: out of memory\n");
+		exit(1);
+	}
+
+	more_tags = 1;
+	idx = BUF_SIZE;
+	while (more_tags) {
+		// refill the buffer
+		if (idx >= BUF_SIZE) {
+			idx = 0;
+			size_t count = fread(buffer, sizeof(char), BUF_SIZE, fp);
+			if (count < sizeof(char)*BUF_SIZE) {
+				// couldn't fill buf
+				if (feof(fp)) {
+					more_tags = 0;
+				}
+				else {
+					printf("Error: file read error: %d\n", errorno = ferror(fp));
+					return 0;
+				}
+			}
+		}
+		memcpy(tag, &buffer[idx], sizeof(char)*TAG_SIZE);
+		int i;
+		for (i = 0; i < TAG_SIZE; i++) {
+			if (!isupper(tag[i]) && !isdigit(tag[i])) {
+				// this is not a legit tag
+				more_tags = 0;
+				break;
+			}
+		}
+		if (more_tags == 0) break;
+		idx += TAG_SIZE; // advance our buffer index
+		int fieldsize = 0;
+		int cur_pos;
+		for (cur_pos = idx; idx - cur_pos  < 4 && idx < BUF_SIZE; idx++) {
+			fieldsize += (buffer[idx] << 8*(3 - idx + cur_pos));
+		}
+		if (idx + fieldsize + 2 + TAG_SIZE >= BUF_SIZE) { // two is for the two flag bytes
+			fseek(fp, cur_pos - idx, SEEK_CUR); // put file point to start of this tag
+			continue;
+		}
+		// skip flag bytes
+		idx += 2;
+		if (fieldsize <= MAX_FIELD) {
+			int fieldint = (int) field_from_tag(tag);
+			if (fieldint != -1 && user_data.fields[fieldint] != NULL) {
+				memcpy(user_data.fields[fieldint], &buffer[idx], fieldsize);
+				adjust_spacing(user_data.fields[fieldint], fieldsize);
+			}
+		}
+		idx += fieldsize;
+	}
+	return 1;
+}
+
 // Search file given by fp for start of ID3 tag and return with
 // file pointer at first byte after header (i.e. first field)
-char find_id3_start(FILE** fp, header_info_t* header, char** buf, int* buf_idx, int bufsz) {
+char find_id3_start(header_info_t* header, FILE** fp) {
 	size_t result;
-	char* subbuf;
-	int i;
+	char *buf, *subbuf;
+	int i, bufsz, buf_idx;
 	
+	bufsz = BUF_SIZE;
+
+	buf = malloc(sizeof(char) * bufsz);
+	if (buf == NULL) {
+		printf("Error: out of memory\n");
+		return 0;
+	}
 	subbuf = malloc(sizeof(char) * bufsz);
 	if (subbuf == NULL) {
 		printf("Error: out of memory\n");
 		return 0;
 	}
 
-	result = fread(*buf, sizeof(char), bufsz, *fp);
+	result = fread(buf, sizeof(char), bufsz, *fp);
 	if (result != bufsz*sizeof(char)) {
 		printf("Error: error occurred while reading from file\n");
 		return 0;
 	}
-	*buf_idx = 0;
+	buf_idx = 0;
 	// check if tag is first thing in file (it often is)
-	if (strncmp(*buf, "ID3", 3) == 0) {
+	if (strncmp(buf, "ID3", 3) == 0) {
 		// found it - collect info
-		*buf_idx += 3; // advance buffer passed "ID3"
-		memcpy(subbuf, &(*buf)[*buf_idx], NUM_VERS_BYTES);
+		buf_idx += 3; // advance buffer passed "ID3"
+		memcpy(subbuf, &buf[buf_idx], NUM_VERS_BYTES);
 		header->version = 0;
 		for (i = 0; i < NUM_VERS_BYTES; i++) {
 			header->version |= subbuf[i] << 8*i;
 		}
-		(*buf_idx) += NUM_VERS_BYTES;
-		header->flags = (*buf)[*buf_idx]; // 1 flags byte
-		(*buf_idx) += NUM_FLAG_BYTES;
-		memcpy(subbuf, &(*buf)[*buf_idx], NUM_SIZE_BYTES);
+		buf_idx += NUM_VERS_BYTES;
+		header->flags = buf[buf_idx]; // 1 flags byte
+		buf_idx += NUM_FLAG_BYTES;
+		memcpy(subbuf, &buf[buf_idx], NUM_SIZE_BYTES);
 		header->size = 0;
 		for (i = 0; i < NUM_SIZE_BYTES; i++) {
 			header->size |= subbuf[i] << 8*(NUM_SIZE_BYTES - i - 1);
 		}
-		*buf_idx += NUM_SIZE_BYTES;
+		buf_idx += NUM_SIZE_BYTES;
+		free(subbuf);
+		free(buf);
+		fseek(*fp, buf_idx, SEEK_SET);
+		return 1;
 	}
-	free(subbuf);
-	return 1;
+	else return 0;
 }
 
 void print_usage() 
@@ -227,49 +289,44 @@ char get_user_fields(int* argcount, char*** args, data_t* user_data, int* order)
 	int data_flag;	// flag indicating that user field data should be next argument
 					//	used for write mode only
 
-	// initialize field_order with null before getting user data
-	int k;
-	for (k = 0; k < NUM_FIELDS + 1; k++) {
-		order[k] = -1;
-	}
 	data_flag = 0;
 	order_index = 0;
 	done = 0;
 	retval = 1;
-	while (!done && --*argcount) {
-		this_arg = *((*args)+1);
+	while (!done) {
+		this_arg = **args;
 		if (*this_arg == '-') {
-			switch (*++this_arg) {
-				case 'a':
-					field = ARTIST;
-					break;
-				case 'l':
-					field = ALBUM;
-					break;
-				case 'y':
-					field = YEAR;
-					break;
-				case 'k':
-					field = TRACK;
-					break;
-				case 't':
-					field = TITLE;
-					break;
-				case 'w':
-				case 'r':
-					retval = 0;
-					printf("Error: cannot combine read and write options, one thing at a time...\n");
-					done = 1;
-					return retval;
-					break;
-				default:
-					retval = 0; // let caller know something went wrong
-					printf("Error: Unexpected option used in combination with -r[ead]\n");
-					done = 1;
-					return retval;
-					break;
-			}
-			if (!done) {
+			while (*++this_arg != '\0') {
+				switch (*this_arg) {
+					case 'a':
+						field = ARTIST;
+						break;
+					case 'l':
+						field = ALBUM;
+						break;
+					case 'y':
+						field = YEAR;
+						break;
+					case 'k':
+						field = TRACK;
+						break;
+					case 't':
+						field = TITLE;
+						break;
+					case 'w':
+					case 'r':
+						retval = 0;
+						printf("Error: cannot combine read and write options, one thing at a time...\n");
+						done = 1;
+						return retval;
+						break;
+					default:
+						retval = 0; // let caller know something went wrong
+						printf("Error: Unexpected option used in combination with -r[ead]\n");
+						done = 1;
+						return retval;
+						break;
+				}
 				if (order_index <= NUM_FIELDS) {
 					order[order_index++] = (int)field;
 				}
@@ -277,11 +334,11 @@ char get_user_fields(int* argcount, char*** args, data_t* user_data, int* order)
 					printf("Error: requested repeat or unsupported fields\n");
 					exit(1);
 				}
-			   	++*args; // advance arg pointer if we used the arg
 				user_data->fields[field] = malloc(sizeof(char) * MAX_FIELD);
 				if (user_data->rwflag == WRITE) { // next argument should be input string
 					if (--*argcount) {
 						strncpy(user_data->fields[field], *++*args, MAX_FIELD);
+						break;
 					}
 					else { // should have been an argument here
 						printf("Error: no input found following write field option\n");
@@ -290,10 +347,11 @@ char get_user_fields(int* argcount, char*** args, data_t* user_data, int* order)
 					}
 				}
 			}
+			if (--*argcount > 0)	(*args)++;
+			else print_usage(), exit(1);
 		}
 		else { // non '-' argument
 			done = 1; 
-			++*argcount;
 		}
 	}
 	return retval;
