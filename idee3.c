@@ -103,7 +103,7 @@ int main(int argc, char **argv)
 			}
 		}
 
-		ok = find_id3_start(&header, &fp);
+		ok = find_id3_start(&header, &fp, user_data);
 		if (!ok) {
 			fclose(fp);
 			exit(1);
@@ -149,13 +149,15 @@ int main(int argc, char **argv)
 }
 
 char parse_tags(data_t *user_data_in, FILE **fp_in) {
-	int idx, errorno;
+	int idx, errorno, buf_end;
 	char more_tags;
 	char* tag;
 	char* buffer;
+	char write_buf[BUF_SIZE];
+	int start;
 	data_t user_data;
 	FILE *fp;
-	size_t size;
+	size_t size, count;
 
 	user_data = *user_data_in;
 	fp = *fp_in;
@@ -170,22 +172,22 @@ char parse_tags(data_t *user_data_in, FILE **fp_in) {
 
 	more_tags = 1;
 	idx = BUF_SIZE;
+	buf_end = BUF_SIZE;
 	while (more_tags) {
 		// refill the buffer
-		if (idx >= BUF_SIZE) {
+		if (idx >= buf_end) {
+			if (buf_end < BUF_SIZE) return 1; // end of file
 			idx = 0;
-			size_t count = fread(buffer, sizeof(char), BUF_SIZE, fp);
-			if (count < sizeof(char)*BUF_SIZE) {
+			buf_end = fread(buffer, sizeof(char), BUF_SIZE, fp);
+			if (buf_end < sizeof(char)*BUF_SIZE) {
 				// couldn't fill buf
-				if (feof(fp)) {
-					more_tags = 0;
-				}
-				else {
+				if (!feof(fp)) {
 					printf("Error: file read error: %d\n", errorno = ferror(fp));
 					return 0;
 				}
 			}
 		}
+		start = idx;
 		memcpy(tag, &buffer[idx], sizeof(char)*TAG_SIZE);
 		int i;
 		for (i = 0; i < TAG_SIZE; i++) {
@@ -198,31 +200,100 @@ char parse_tags(data_t *user_data_in, FILE **fp_in) {
 		if (more_tags == 0) break;
 		idx += TAG_SIZE; // advance our buffer index
 		int fieldsize = 0;
-		int cur_pos;
-		for (cur_pos = idx; idx - cur_pos  < 4 && idx < BUF_SIZE; idx++) {
+		int cur_pos = idx;
+		for ( ; idx - cur_pos  < 4 && idx < buf_end; idx++) {
 			fieldsize += (buffer[idx] << 8*(3 - idx + cur_pos));
-		}
-		if (idx + fieldsize + 2 + TAG_SIZE >= BUF_SIZE) { // two is for the two flag bytes
-			fseek(fp, cur_pos - idx, SEEK_CUR); // put file point to start of this tag
-			continue;
 		}
 		// skip flag bytes
 		idx += 2;
-		if (fieldsize <= MAX_FIELD) {
-			int fieldint = (int) field_from_tag(tag);
-			if (fieldint != -1 && user_data.fields[fieldint] != NULL) {
-				memcpy(user_data.fields[fieldint], &buffer[idx], fieldsize);
-				adjust_spacing(user_data.fields[fieldint], fieldsize);
+		if (idx + fieldsize + TAG_SIZE >= buf_end) { // check if we have the whole field in the buffer
+			if (fieldsize + 10 < buf_end)  {
+				fseek(fp, -buf_end + start, SEEK_CUR);  // move pointer to start of this tag
+				idx = buf_end;							// force buffer refill
 			}
+			else { // field won't fit in the buffer we're using, write the rest now
+				if (user_data.rwflag == READ) {
+					fseek(fp, fieldsize - idx, SEEK_CUR); // move file pointer to start of next field
+					idx = buf_end; // force buffer refill
+				}
+				else {
+					// write the whole tag here and now
+					// gets complicated because you need a buffer refill in there
+				}
+			}
+			continue;
+		}
+		int fieldint = (int) field_from_tag(tag);
+		if (fieldint != -1 && user_data.fields[fieldint] != NULL) {
+			if (user_data.rwflag == READ) {
+				if (fieldsize <= MAX_FIELD) {
+					memcpy(user_data.fields[fieldint], &buffer[idx], fieldsize);
+					adjust_spacing(user_data.fields[fieldint], fieldsize);
+				}
+			}
+			else {	// write to new file
+				char status;
+				status = write_field(tag, user_data.fields[fieldint], user_data.new_file);
+				if (status != 1) {
+					exit(1);
+				}
+			}
+		}
+		else if (user_data.rwflag == WRITE) { // not a field of interest, just copy it over
+			fwrite(&buffer[start], sizeof(char), idx - start + fieldsize, user_data.new_file);
 		}
 		idx += fieldsize;
 	}
+	// write the remaininder of the file if in WRITE
+	if (user_data.rwflag == WRITE) {
+		fwrite(&buffer[idx], sizeof(char), BUF_SIZE - idx + 1, user_data.new_file);
+		do {
+			count = fread(buffer, sizeof(char), BUF_SIZE, fp);
+			fwrite(buffer, sizeof(char), count, user_data.new_file);
+		} while (count == sizeof(char) * BUF_SIZE);
+	}
+	return 1;
+}
+
+char write_field(char *tag, char *field_str_in, FILE *fp) {
+	int full_tag_len, field_len, prev_tot, i, j;
+	char *buf, size_str[NUM_SIZE_BYTES], *field_str;
+
+	field_str = malloc(sizeof(char) * (strlen(field_str_in) + 2)); // spaces for start null and null term
+
+	field_len = strlen(field_str_in); 
+	field_str[0] = '\0'; // add null field start
+	memcpy(&field_str[1], field_str_in, field_len);
+	field_len++; // account for null start in field_len
+	full_tag_len = TAG_SIZE + NUM_SIZE_BYTES + 2 + field_len; // 2 for flag bytes
+	buf = malloc(sizeof(char) * full_tag_len);
+	if (buf == NULL) {
+		printf("Error: out of memory\n");
+		exit(1);
+	}
+	memset(buf, '\0', full_tag_len);
+	i = 0; // leave first byte null (that's the format)
+	memcpy(buf, tag, TAG_SIZE);
+	i += TAG_SIZE;
+	prev_tot = 0;
+	memset(size_str, '\0', NUM_SIZE_BYTES);
+	for (j = 0; j < NUM_SIZE_BYTES; j++) {
+		size_str[j] |= ((field_len-prev_tot) >> 8*(NUM_SIZE_BYTES-j-1));
+		prev_tot += size_str[j] << 8*(NUM_SIZE_BYTES-j-1);
+	}
+	memcpy(&buf[i], size_str, NUM_SIZE_BYTES); 
+	i += NUM_SIZE_BYTES;
+	memset(&buf[i], '\0', 2); // set 2 flag bytes to null
+	i += 2;
+	memcpy(&buf[i], field_str, field_len); 
+	fwrite(buf, sizeof(char), full_tag_len, fp);
+	free(buf);
 	return 1;
 }
 
 // Search file given by fp for start of ID3 tag and return with
 // file pointer at first byte after header (i.e. first field)
-char find_id3_start(header_info_t* header, FILE** fp) {
+char find_id3_start(header_info_t* header, FILE** fp, data_t user_data) {
 	size_t result;
 	char *buf, *subbuf;
 	int i, bufsz, buf_idx;
@@ -246,8 +317,10 @@ char find_id3_start(header_info_t* header, FILE** fp) {
 		return 0;
 	}
 	buf_idx = 0;
+	int start;
 	// check if tag is first thing in file (it often is)
 	if (strncmp(buf, "ID3", 3) == 0) {
+		start = buf_idx;
 		// found it - collect info
 		buf_idx += 3; // advance buffer passed "ID3"
 		memcpy(subbuf, &buf[buf_idx], NUM_VERS_BYTES);
@@ -264,20 +337,27 @@ char find_id3_start(header_info_t* header, FILE** fp) {
 			header->size |= subbuf[i] << 8*(NUM_SIZE_BYTES - i - 1);
 		}
 		buf_idx += NUM_SIZE_BYTES;
+		if (user_data.rwflag == WRITE) {
+			fwrite(&buf[start], sizeof(char), buf_idx - start, user_data.new_file);
+		}
 		free(subbuf);
 		free(buf);
 		fseek(*fp, buf_idx, SEEK_SET);
 		return 1;
 	}
-	else return 0;
+	else {
+		free(subbuf);
+		free(buf);
+		return 0;
+	}
 }
 
 void print_usage() 
 {
 	printf("Usage: idee3 [OPTION]... FILE...\n"
 		   "Read or edit the meta-data (e.g. id3v2 tag) of FILE(s)\n\n"
-	   	   "  -h\t\t\tprint this message\n"
-		   "  -w\t\t\twrite or edit meta-data of FILE\n\n");
+	   	   "  -h\t\tprint this message\n"
+		   "  -w\t\twrite or edit meta-data of FILE\n\n");
 }
 
 char get_user_fields(int* argcount, char*** args, data_t* user_data, int* order) 
