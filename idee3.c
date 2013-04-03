@@ -153,6 +153,7 @@ char parse_tags(data_t *user_data_in, FILE **fp_in) {
 	char more_tags;
 	char* tag;
 	char* buffer;
+	unsigned char c;
 	char write_buf[BUF_SIZE];
 	int start;
 	data_t user_data;
@@ -202,11 +203,12 @@ char parse_tags(data_t *user_data_in, FILE **fp_in) {
 		int fieldsize = 0;
 		int cur_pos = idx;
 		for ( ; idx - cur_pos  < 4 && idx < buf_end; idx++) {
-			fieldsize += (buffer[idx] << 8*(3 - idx + cur_pos));
+			c = buffer[idx]; 
+			fieldsize += (int) c << 8*(3 - idx + cur_pos); 
 		}
 		// skip flag bytes
 		idx += 2;
-		if (idx + fieldsize + TAG_SIZE >= buf_end) { // check if we have the whole field in the buffer
+		if (idx + fieldsize >= buf_end) { // check if we have the whole field in the buffer
 			if (fieldsize + 10 < buf_end)  {
 				fseek(fp, -buf_end + start, SEEK_CUR);  // move pointer to start of this tag
 				idx = buf_end;							// force buffer refill
@@ -217,8 +219,30 @@ char parse_tags(data_t *user_data_in, FILE **fp_in) {
 					idx = buf_end; // force buffer refill
 				}
 				else {
-					// write the whole tag here and now
-					// gets complicated because you need a buffer refill in there
+					count = fwrite(&buffer[idx-10], sizeof(char), 10, user_data.new_file); // write header
+					int more = 1;
+					while (more) {
+						if (buf_end < BUF_SIZE) more = 0;
+						if (fieldsize > buf_end) {
+							count = fwrite(&buffer[idx], sizeof(char), buf_end-idx, user_data.new_file);
+							if (count < buf_end-idx) {
+								printf("Error: couldn't write to new file\n");
+								exit(1);
+							}
+							fieldsize -= count; // keep track of how much of the field is left
+							buf_end = fread(buffer, sizeof(char), BUF_SIZE, fp); // refill
+							idx = 0;
+						}
+						else {
+							count = fwrite(&buffer[idx], sizeof(char), fieldsize-idx, user_data.new_file);
+							if (count < fieldsize-idx) {
+								printf("Error: couldn't write to new file\n");
+								exit(1);
+							}
+							idx += fieldsize;
+							more = 0;
+						}
+					}
 				}
 			}
 			continue;
